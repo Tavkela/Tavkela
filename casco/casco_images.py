@@ -27,11 +27,13 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
                     "(KHTML, like Gecko) Chrome/141.0 Safari/537.36"}
 
 FILLS = {
-    "green": PatternFill("solid", fgColor="C6EFCE"),
-    "yellow": PatternFill("solid", fgColor="FFEB9C"),
-    "red": PatternFill("solid", fgColor="FFC7CE"),
-    "blue": PatternFill("solid", fgColor="BDD7EE"),
+    "green": PatternFill("solid", fgColor="FFC6EFCE", bgColor="FFC6EFCE"),
+    "yellow": PatternFill("solid", fgColor="FFFFEB9C", bgColor="FFFFEB9C"),
+    "red": PatternFill("solid", fgColor="FFFFC7CE", bgColor="FFFFC7CE"),
+    "blue": PatternFill("solid", fgColor="FFBDD7EE", bgColor="FFBDD7EE"),
 }
+
+ICONS = {"green": "🟢", "yellow": "🟡", "red": "🔴", "blue": "🔵"}
 
 ARTICLE_RE = re.compile(r"(\d{2})\.(\d{4})")
 
@@ -277,7 +279,7 @@ def main():
         stats[kind] += 1
         for c in range(1, c_status + 3):
             ws.cell(r, c).fill = FILLS[kind]
-        ws.cell(r, c_status, status)
+        ws.cell(r, c_status, f"{ICONS[kind]} {status}")
         if link:
             ws.cell(r, c_status + 1, link).hyperlink = link
         ws.cell(r, c_status + 2, n_img or None)
