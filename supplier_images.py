@@ -76,7 +76,7 @@ class Casco:
         return casco_base(excel_value)
 
     @staticmethod
-    def split_sku(sku):
+    def split_sku(sku, product=None):
         a = casco_base(sku)
         return (a, a) if a else (None, None)
 
@@ -107,7 +107,7 @@ class Lenz:
         return cls.norm(excel_value) if excel_value not in (None, "") else None
 
     @classmethod
-    def split_sku(cls, sku):
+    def split_sku(cls, sku, product=None):
         if "_" not in (sku or ""):
             return None, None
         art, rest = sku.split("_", 1)
@@ -124,7 +124,43 @@ class Lenz:
         return None
 
 
-BRANDS = {"casco": Casco, "lenz": Lenz}
+class Shred:
+    """shredoptics.com: Excel-ის „მომწ. კოდი“ = ვარიანტის სრული SKU (GOGRAO21A, HENOTP12L).
+    სურათის სახელი ფერის კოდით იწყება: GOGRAO21A_21.jpg, HENOTP12_11.jpg (ზომის გარეშე)."""
+    name, site = "Shred", "https://shredoptics.com"
+    check_color = False  # SKU-ში ფერიცაა და ზომაც
+    _prefixes = {}
+
+    @staticmethod
+    def article(excel_value):
+        return str(excel_value).strip().upper() if excel_value not in (None, "") else None
+
+    @classmethod
+    def image_key(cls, fname, article=None):
+        m = re.match(r"([A-Z]{2}[A-Z0-9]{4,})_", fname)
+        return m.group(1) if m else None
+
+    @classmethod
+    def split_sku(cls, sku, product=None):
+        sku = str(sku or "").strip().upper()
+        if not sku:
+            return None, None
+        key = sku
+        if product is not None:
+            if product["id"] not in cls._prefixes:
+                cls._prefixes[product["id"]] = {
+                    k for k in (cls.image_key(image_name(i["src"])) for i in product.get("images", [])) if k}
+            pref = [p for p in cls._prefixes[product["id"]] if sku.startswith(p)]
+            if pref:
+                key = max(pref, key=len)
+        return sku, key
+
+    @staticmethod
+    def handle_article(handle):
+        return None
+
+
+BRANDS = {"casco": Casco, "lenz": Lenz, "shred": Shred}
 
 
 # ---------- ქსელი ----------
@@ -183,7 +219,7 @@ def build_groups(brand, products):
         ci = color_index(p)
         groups = {}
         for v in p.get("variants", []):
-            art, key = brand.split_sku(v.get("sku"))
+            art, key = brand.split_sku(v.get("sku"), p)
             if not art:
                 continue
             g = groups.setdefault((art, key), {
@@ -207,7 +243,7 @@ def images_for(brand, group):
     imgs = sorted(p.get("images", []), key=lambda i: i.get("position", 0))
     keys_of = {}
     for v in p.get("variants", []):
-        art, key = brand.split_sku(v.get("sku"))
+        art, key = brand.split_sku(v.get("sku"), p)
         if art:
             keys_of[v["id"]] = key
     all_keys = set(keys_of.values())
@@ -261,9 +297,14 @@ def color_score(excel_color, site_color):
 
 
 def tokens(s):
-    s = re.sub(r"[^A-Z0-9]+", " ", str(s).upper())
+    s = re.sub(r"[^A-Z0-9]+", " ", str(s).upper().replace("+", " PLUS "))
     return [re.sub(r"(.)\1+", r"\1", t) for t in s.split()
             if t not in {"ML", "MAGNET", "LINK", "CASCO", "LENZ"}]
+
+
+def title_score(model, title):
+    want, have = set(tokens(model)), tokens(title)
+    return sum(t in want for t in have) - 2 * sum(t not in want for t in have)
 
 
 def name_candidates(model, products, limit=3):
@@ -408,7 +449,8 @@ def main():
                 if best < 1.0:
                     sure = False
             elif groups:
-                chosen = groups[0]
+                # ერთი კოდი რამდენიმე პროდუქტშია (მაგ. GRATIFY და GRATIFY+): ვირჩევთ სახელით
+                chosen = max(groups, key=lambda g: title_score(model, g["product"]["title"]))
 
             if chosen and sure:
                 p = chosen["product"]
