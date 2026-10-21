@@ -56,7 +56,13 @@ def suffix(i):
 
 def get(url, session, **kw):
     for attempt in range(5):
-        r = session.get(url, headers=UA, timeout=60, **kw)
+        try:
+            r = session.get(url, headers=UA, timeout=60, **kw)
+        except requests.ConnectionError:
+            if attempt == 4:
+                raise
+            time.sleep(2 ** attempt)
+            continue
         if r.status_code in (429, 502, 503):
             time.sleep(2 ** attempt)
             continue
@@ -154,8 +160,10 @@ def name_candidates(model, products, limit=3):
         return []
     found = []
     for p in products:
-        have = set(tokens(p.get("title", "")) + tokens(p.get("handle", "")))
-        if all(t in have for t in want):
+        title = tokens(p.get("title", ""))
+        have = set(title + tokens(p.get("handle", "")))
+        # სათაური მოდელის სახელით უნდა იწყებოდეს (მაგ. "INTERIOR ... SP-4" არ ჩაითვალოს)
+        if title[:1] == want[:1] and all(t in have for t in want):
             found.append(p)
     return found[:limit]
 
