@@ -7,8 +7,8 @@
     python3 supplier_images.py FILE.xlsx --out OUT_DIR [--brand lenz] [--size 1500] [--odoo https://ODOO_DOMAIN]
 
 შედეგი OUT_DIR-ში:
-    სურათები/<კოდი>.jpg, <კოდი>_A.jpg, ...   (პირველი: მთავარი სურათი)
-    <ბრენდი> - შედეგი.xlsx                    (🟢 ნაპოვნია / 🟡 შესამოწმებელი / 🔴 ვერ ვიპოვე / 🔵 Odoo-ში უკვე არის)
+    images/<კოდი>.jpg, <კოდი>_A.jpg, ...      (პირველი: მთავარი სურათი)
+    <ბრენდი>_result.xlsx                      (🟢 ნაპოვნია / 🟡 შესამოწმებელი / 🔴 ვერ ვიპოვე / 🔵 Odoo-ში უკვე არის)
 
 Excel-ში უკვე მწვანედ მონიშნული სტრიქონები (სურათი უკვე აქვს) გამოიტოვება.
 """
@@ -44,6 +44,7 @@ COLS = {
     "article": ["მოდელის კოდი", "მომწ. კოდი", "მომწოდებლის კოდი"],
     "model": ["მოდელი", "სახელი"],
     "color": ["ფერი"],
+    "note": ["შენიშვნა"],
     "brand": ["ფირმა", "ბრენდი"],
 }
 
@@ -160,7 +161,87 @@ class Shred:
         return None
 
 
-BRANDS = {"casco": Casco, "lenz": Lenz, "shred": Shred}
+class Schreuderssport:
+    """schreuderssport.com (Shopify არ არის): პროდუქტის გვერდი /en/product/<არტიკული>.
+    ფერები გვერდზე ასე წერია: 'Black/Red (ZWR)'; ფერის კოდი Excel-ის „შენიშვნა“-შიცაა.
+    სურათები: <არტ>.jpg (ყველა ფერი ერთად), <არტ>_<ფერი>[_...].jpg, <არტ>_<აღწერა>.jpg (ზოგადი)."""
+    name, site = "Schreuderssport", "https://www.schreuderssport.com"
+    _pages = {}
+
+    @classmethod
+    def page(cls, session, art):
+        if art not in cls._pages:
+            html = get(f"{cls.site}/en/product/{quote(art)}", session).text
+            cls._pages[art] = None if "<title>Product not found" in html else html
+        return cls._pages[art]
+
+    @staticmethod
+    def color_names(name):
+        out = []
+        for part in str(name or "").lower().replace("gray", "grey").split("/"):
+            k = re.sub(r"[^a-z]", "", part)
+            if k:
+                out.append(k)
+        return sorted(out)
+
+    @classmethod
+    def resolve(cls, session, art_raw, note, color, model):
+        art = str(art_raw).strip()
+        link = f"{cls.site}/en/product/{quote(art)}"
+        html = cls.page(session, art)
+        if not html:
+            return {"kind": "red", "status": "საიტზე ვერ ვიპოვე (ძველი მოდელი / აღარ იყიდება)"}
+        title = re.search(r"<title>[^<]*? - ([^<]*?) - Design", html)
+        title = title.group(1).strip() if title else art
+        colors = {}
+        for td in re.findall(r"<td>([^<]*\([A-Z0-9]{2,4}\)(?:<br />[^<]*\([A-Z0-9]{2,4}\))*)</td>", html):
+            for item in td.split("<br />"):
+                mm = re.match(r"\s*(.+?)\s*\(([A-Z0-9]{2,4})\)\s*$", item)
+                if mm:
+                    colors[mm.group(2)] = mm.group(1)
+        m = re.search(r"imagedelivery\.net/([^/]+)/products/", html)
+        names = []
+        for n in re.findall(rf"products/({re.escape(art)}(?:_[^\"/ ]*)?\.jpg)", html, re.I):
+            if n not in names:
+                names.append(n)
+        if not m or not names:
+            return {"kind": "yellow", "status": f"საიტზე არის, მაგრამ სურათი არ აქვს — {title}", "link": link}
+
+        note = str(note or "").strip().upper()
+        want = cls.color_names(color)
+        code, why = None, ""
+        if note in colors:
+            code = note
+        else:
+            exact = [c for c, nm in colors.items() if cls.color_names(nm) == want]
+            if exact:
+                code = exact[0]
+            elif len(colors) == 1 and set(want) & set(cls.color_names(next(iter(colors.values())))):
+                code = next(iter(colors))
+                why = f" (Excel-ში '{color}', საიტზე '{colors[code]}')"
+        if colors and not code:
+            return {"kind": "yellow", "link": link,
+                    "status": f"შესამოწმებელი: ფერი '{color}' ზუსტად ვერ დავადგინე. საიტზე არის: "
+                              + "; ".join(f"{nm} ({c})" for c, nm in colors.items())}
+
+        def parts(n):
+            return n[len(art):-4].lstrip("_").split("_")
+
+        if code:
+            specific = [n for n in names if parts(n)[0].upper() == code]
+            generic = [n for n in names if parts(n)[0] and parts(n)[0].upper() not in colors
+                       and not re.fullmatch(r"[A-Z0-9]{3}", parts(n)[0])]
+            bare = [n for n in names if not parts(n)[0]]
+            chosen = specific + generic if specific else bare + generic
+        else:
+            chosen = names
+        base = f"https://imagedelivery.net/{m.group(1)}/products/"
+        return {"kind": "green", "link": link, "key": (art, code),
+                "srcs": [base + n + "/public" for n in chosen],
+                "status": f"ნაპოვნია: {title}" + (f" — {colors[code]} ({code})" if code else "") + why}
+
+
+BRANDS = {"casco": Casco, "lenz": Lenz, "shred": Shred, "schreuderssport": Schreuderssport}
 
 
 # ---------- ქსელი ----------
@@ -353,7 +434,7 @@ def odoo_has(session, odoo, code):
 
 def fetch_jpeg(session, src, size):
     url = "https:" + src if src.startswith("//") else src
-    if size:
+    if size and ("cdn.shopify.com" in url or "/cdn/shop/" in url):
         url += ("&" if "?" in url else "?") + f"width={size}"
     im = Image.open(io.BytesIO(get(url, session).content))
     im.load()
@@ -407,7 +488,7 @@ def main():
     brand = BRANDS[brand_key]
 
     out = Path(args.out)
-    img_dir = out / "სურათები"
+    img_dir = out / "images"
     img_dir.mkdir(parents=True, exist_ok=True)
     s = requests.Session()
 
@@ -416,10 +497,12 @@ def main():
     for i, title in enumerate(["სტატუსი", "საიტის ბმული", "სურათები"]):
         ws.cell(header_row, c_status + i, title).font = bold
 
-    print(f"{brand.name}: კატალოგის ჩამოტვირთვა...")
-    products = load_catalog(brand, s, out / f"{brand_key}_products.json")
-    index = build_groups(brand, products)
-    print(f"  სულ {len(products)} პროდუქტი, {len(index)} არტიკული")
+    products, index = [], {}
+    if not hasattr(brand, "resolve"):
+        print(f"{brand.name}: კატალოგის ჩამოტვირთვა...")
+        products = load_catalog(brand, s, out / f"{brand_key}_products.json")
+        index = build_groups(brand, products)
+        print(f"  სულ {len(products)} პროდუქტი, {len(index)} არტიკული")
 
     cache = {}
     stats = {k: 0 for k in ICONS}
@@ -438,6 +521,16 @@ def main():
             kind, status = "skip", "უკვე აქვს სურათი (მწვანედ იყო მონიშნული) — გამოტოვდა"
         elif args.odoo and odoo_has(s, args.odoo, code):
             kind, status = "blue", "Odoo-ს საიტზე უკვე დევს — სურათები არ ჩამოიწერა"
+        elif hasattr(brand, "resolve"):
+            note = ws.cell(r, cols["note"]).value if cols["note"] else ""
+            res = brand.resolve(s, art_raw, note, color, model)
+            kind, status, link = res["kind"], res["status"], res.get("link", "")
+            if res.get("srcs"):
+                if res["key"] not in cache:
+                    cache[res["key"]] = [fetch_jpeg(s, u, args.size) for u in res["srcs"]]
+                for i, data in enumerate(cache[res["key"]]):
+                    (img_dir / f"{code}{suffix(i)}.jpg").write_bytes(data)
+                n_img = len(cache[res["key"]])
         else:
             art = brand.article(art_raw)
             groups = index.get(art, [])
@@ -495,7 +588,7 @@ def main():
 
     ws.column_dimensions[get_column_letter(c_status)].width = 60
     ws.column_dimensions[get_column_letter(c_status + 1)].width = 45
-    wb.save(out / f"{brand.name} - შედეგი.xlsx")
+    wb.save(out / f"{brand.name}_result.xlsx")
     print("\nშედეგი:", stats, "| სურათები:", len(list(img_dir.glob("*.jpg"))))
 
 
