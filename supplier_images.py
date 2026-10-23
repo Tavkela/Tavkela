@@ -355,7 +355,55 @@ class Oakley:
                 "status": f"ნაპოვნია: {hit.get('name')}{why} — მხოლოდ მთავარი სურათი"}
 
 
-BRANDS = {"oakley": Oakley, "casco": Casco, "lenz": Lenz, "shred": Shred, "schreuderssport": Schreuderssport, "salomon": Salomon}
+class Rehall:
+    """rehall.com (Shopify). SKU-ები EAN-ია, მაგრამ სურათის სახელი = <მოდელის კოდი>_<ფერის კოდი>_<ნომერი>.jpg
+    (60920_3015_01.jpg) — ზუსტად ინვოისის „Item Code“ და ფერის კოდი."""
+    name, site = "Rehall", "https://rehall.com"
+    _imgs, _names = None, {}
+
+    @classmethod
+    def _load(cls, session):
+        if cls._imgs is not None:
+            return
+        cls._imgs, page = {}, 1
+        while True:
+            batch = get(f"{cls.site}/products.json?limit=250&page={page}", session).json()["products"]
+            if not batch:
+                break
+            for p in batch:
+                ci = color_index(p)
+                vcolor = {v["id"]: v.get(f"option{ci + 1}") for v in p.get("variants", [])} if ci is not None else {}
+                for i in p.get("images", []):
+                    m = re.match(r"(\d{4,6})_(\d{3,5})_(\d{1,3})", image_name(i["src"]))
+                    if m:
+                        cls._imgs.setdefault((m.group(1), m.group(2)), {}).setdefault(int(m.group(3)), (i["src"], p))
+                        for vid in i.get("variant_ids") or []:  # ფერის სახელი -> ფერის კოდი
+                            if vcolor.get(vid):
+                                cls._names[(m.group(1), vcolor[vid].strip().lower())] = m.group(2)
+            page += 1
+            time.sleep(0.5)
+
+    @classmethod
+    def resolve(cls, session, art_raw, note, color, model):
+        cls._load(session)
+        art, cc = str(art_raw).strip(), str(note or "").strip()
+        found, why = cls._imgs.get((art, cc)), ""
+        if not found and color:
+            alt = cls._names.get((art, str(color).strip().lower()))
+            if alt:
+                found, why = cls._imgs.get((art, alt)), f" (შესამოწმებელი: ფერის კოდი Excel-ში {cc}, საიტზე {alt})"
+        if not found:
+            others = sorted(c for (a, c) in cls._imgs if a == art)
+            if others:
+                return {"kind": "yellow", "status": f"შესამოწმებელი: მოდელი საიტზე არის, მაგრამ ფერი {cc} არა. საიტზე: {', '.join(others)}"}
+            return {"kind": "red", "status": "საიტზე ვერ ვიპოვე"}
+        srcs = [found[k][0] for k in sorted(found)]
+        p = found[min(found)][1]
+        return {"kind": "yellow" if why else "green", "link": f"{cls.site}/products/{p['handle']}", "key": (art, cc),
+                "srcs": srcs, "status": f"ნაპოვნია: {p['title']} — {color or cc}{why}"}
+
+
+BRANDS = {"rehall": Rehall, "oakley": Oakley, "casco": Casco, "lenz": Lenz, "shred": Shred, "schreuderssport": Schreuderssport, "salomon": Salomon}
 
 
 # ---------- ქსელი ----------
@@ -628,7 +676,8 @@ def main():
         if code in (None, ""):
             # Odoo-ს კოდი თუ არ არის: UPC (ერთი ფერი), თორემ მომწოდებლის კოდი
             upc = ws.cell(r, cols["upc"]).value if cols["upc"] else None
-            code = upc if upc not in (None, "") else art_raw
+            cc = ws.cell(r, cols["colorcode"]).value if cols["colorcode"] else None
+            code = upc if upc not in (None, "") else f"{art_raw}_{cc}" if cc not in (None, "") else art_raw
         if code in (None, "") or art_raw in (None, ""):
             continue
         code = str(code).strip()
@@ -646,6 +695,8 @@ def main():
             if brand is Oakley:
                 extra["upc"] = ws.cell(r, cols["upc"]).value if cols["upc"] else None
                 note = ws.cell(r, cols["colorcode"]).value if cols["colorcode"] else ""  # 7064H200
+            if brand is Rehall:
+                note = ws.cell(r, cols["colorcode"]).value if cols["colorcode"] else ""  # 3015
             res = brand.resolve(s, art_raw, note, color, model, **extra)
             kind, status, link = res["kind"], res["status"], res.get("link", "")
             if res.get("srcs"):
