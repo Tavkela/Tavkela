@@ -274,6 +274,13 @@ class Salomon:
                 for page in range(1, res.get("nbPages", 1)):
                     cls._hits += [dict(h, _loc=loc) for h in cls._query(session, loc, text, page=page).get("hits", [])]
 
+    @staticmethod
+    def model_tokens(name):
+        """'X-ADVENTURE RECON GTX W' და 'X-ADVENTURE RECON GORE-TEX' -> ერთნაირი სიტყვები."""
+        name = re.sub(r"\bGTX\b", "GORE TEX", str(name).upper())
+        name = re.sub(r"\bWP\b", "WATERPROOF", name)
+        return [t for t in tokens(name) if t not in ("W", "J", "M", "WIDE", "SET", "SHOES", "BAG")]
+
     @classmethod
     def _find(cls, mat):
         for h in cls._hits:
@@ -307,10 +314,10 @@ class Salomon:
             return {"kind": "green", "link": link, "key": mat, "srcs": srcs,
                     "status": f"ნაპოვნია: {h.get('modelName')} ({h.get('detailedTitle', '')})"}
         cands = {}
-        want = [w for w in tokens(" ".join(words)) if w not in ("GTX", "WP")][:2]
+        want = cls.model_tokens(" ".join(words))
         for x in cls._hits:
-            have = tokens(x.get("modelName", ""))
-            if want and have[:len(want)] == want:
+            have = cls.model_tokens(x.get("modelName", ""))
+            if want and have == want:
                 cands.setdefault(x["modelName"], set()).update((x.get("swatches") or {}).keys())
         if cands:
             return {"kind": "yellow",
