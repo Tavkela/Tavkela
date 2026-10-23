@@ -43,8 +43,10 @@ COLS = {
     "code": ["კოდი"],
     "article": ["მოდელის კოდი", "მომწ. კოდი", "მომწოდებლის კოდი"],
     "model": ["მოდელი", "სახელი"],
-    "color": ["ფერი"],
+    "color": ["ფერი", "ფერი / ლინზა"],
+    "colorcode": ["ფერის კოდი"],
     "note": ["შენიშვნა"],
+    "upc": ["UPC", "UPC Code", "შტრიხკოდი"],
     "brand": ["ფირმა", "ბრენდი"],
 }
 
@@ -326,7 +328,34 @@ class Salomon:
         return {"kind": "red", "status": "საიტზე ვერ ვიპოვე (Salomon-ის ონლაინ კატალოგში ეს მოდელი არ არის)"}
 
 
-BRANDS = {"casco": Casco, "lenz": Lenz, "shred": Shred, "schreuderssport": Schreuderssport, "salomon": Salomon}
+class Oakley:
+    """oakley.com (Akamai ბლოკავს პროდუქტის გვერდებს). საიტის სწრაფი ძიება (/search/autocomplete)
+    ღიაა და ვარიანტს UPC-ით პოულობს მთავარ სურათთან ერთად. დამატებითი ხედების მისამართებს
+    UUID აქვს, ამიტომ აქედან მხოლოდ მთავარი სურათი მოდის."""
+    name, site = "Oakley", "https://www.oakley.com"
+
+    @classmethod
+    def resolve(cls, session, art_raw, note, color, model, upc=None):
+        upc = str(upc or "").strip()
+        if not upc:
+            return {"kind": "red", "status": "UPC არ არის მითითებული"}
+        r = session.get(f"{cls.site}/en-us/search/autocomplete", params={"term": upc},
+                        headers={"User-Agent": "Mozilla/5.0"}, timeout=60)
+        prods = (r.json().get("products") or {}).values() if r.ok else []
+        hit = next((x for x in prods if str(x.get("code")) == upc), None)
+        if not hit or not hit.get("imagelarge"):
+            return {"kind": "red", "status": "საიტზე ვერ ვიპოვე (ამ UPC-ით Oakley-ის საიტზე არაფერი იძებნება)"}
+        img = re.sub(r"\?.*$", "", hit["imagelarge"]) + "?impolicy=PI20_Oakley_Resize&wid=2000"
+        link = cls.site + "/en-us" + hit.get("url", "")
+        kind, why = "green", ""
+        m = re.search(r"__([0-9A-Z]{6})", img)
+        if m and str(note or "").strip() and not str(note).strip().upper().startswith(m.group(1)):
+            kind, why = "yellow", f" (შესამოწმებელი: სურათის ფერის კოდი {m.group(1)}, Excel-ში {note})"
+        return {"kind": kind, "link": link, "key": upc, "srcs": [img],
+                "status": f"ნაპოვნია: {hit.get('name')}{why} — მხოლოდ მთავარი სურათი"}
+
+
+BRANDS = {"oakley": Oakley, "casco": Casco, "lenz": Lenz, "shred": Shred, "schreuderssport": Schreuderssport, "salomon": Salomon}
 
 
 # ---------- ქსელი ----------
@@ -597,7 +626,9 @@ def main():
         art_raw = ws.cell(r, cols["article"]).value
         code = ws.cell(r, cols["code"]).value if cols["code"] else None
         if code in (None, ""):
-            code = art_raw  # Odoo-ს კოდი თუ არ არის, ფაილს მომწოდებლის კოდით ვარქმევთ
+            # Odoo-ს კოდი თუ არ არის: UPC (ერთი ფერი), თორემ მომწოდებლის კოდი
+            upc = ws.cell(r, cols["upc"]).value if cols["upc"] else None
+            code = upc if upc not in (None, "") else art_raw
         if code in (None, "") or art_raw in (None, ""):
             continue
         code = str(code).strip()
@@ -611,7 +642,11 @@ def main():
             kind, status = "blue", "Odoo-ს საიტზე უკვე დევს — სურათები არ ჩამოიწერა"
         elif hasattr(brand, "resolve"):
             note = ws.cell(r, cols["note"]).value if cols["note"] else ""
-            res = brand.resolve(s, art_raw, note, color, model)
+            extra = {}
+            if brand is Oakley:
+                extra["upc"] = ws.cell(r, cols["upc"]).value if cols["upc"] else None
+                note = ws.cell(r, cols["colorcode"]).value if cols["colorcode"] else ""  # 7064H200
+            res = brand.resolve(s, art_raw, note, color, model, **extra)
             kind, status, link = res["kind"], res["status"], res.get("link", "")
             if res.get("srcs"):
                 if res["key"] not in cache:
