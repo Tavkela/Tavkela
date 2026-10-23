@@ -241,7 +241,85 @@ class Schreuderssport:
                 "status": f"ნაპოვნია: {title}" + (f" — {colors[code]} ({code})" if code else "") + why}
 
 
-BRANDS = {"casco": Casco, "lenz": Lenz, "shred": Shred, "schreuderssport": Schreuderssport}
+class Salomon:
+    """salomon.com (Next.js + PerimeterX: გვერდები ბლოკავს). კატალოგს ვკითხულობთ საიტისავე Algolia-ს
+    ძიებიდან: ყოველ პროდუქტს აქვს swatches {მომწ. კოდი (L47270100): image, imageBack, imagesExtra}.
+    სურათები cdn.dam.salomon.com-ზეა (PNG 2000px+)."""
+    name, site = "Salomon", "https://www.salomon.com"
+    APP = "K1N6GB06IP"
+    LOCALES = ["en-GB", "en-US", "de-DE", "fr-FR", "it-IT", "es-ES", "en-CA", "pl-PL", "sv-SE"]
+    _key, _hits, _queried = None, [], set()
+
+    @classmethod
+    def _query(cls, session, loc, text, hits_per_page=1000, page=0):
+        if cls._key is None:
+            r = session.post(f"{cls.site}/api/algolia/secured-key/b", json={"subSegment": "D2C"},
+                             headers={"User-Agent": "Mozilla/5.0"}, timeout=60)  # სრულ Chrome UA-ს PerimeterX ბლოკავს
+            r.raise_for_status()
+            cls._key = r.json()["apiKey"]
+        r = session.post(f"https://{cls.APP}-dsn.algolia.net/1/indexes/prod_{loc}_products/query",
+                         headers={"X-Algolia-Application-Id": cls.APP, "X-Algolia-API-Key": cls._key},
+                         json={"query": text, "hitsPerPage": hits_per_page, "page": page}, timeout=60)
+        return r.json() if r.ok else {}
+
+    @classmethod
+    def _search(cls, session, text):
+        if text in cls._queried:
+            return
+        cls._queried.add(text)
+        for loc in cls.LOCALES:
+            res = cls._query(session, loc, text)
+            cls._hits += [dict(h, _loc=loc) for h in res.get("hits", [])]
+            if not text:  # ცარიელ ძიებაზე Algolia ბევრ გვერდს აბრუნებს
+                for page in range(1, res.get("nbPages", 1)):
+                    cls._hits += [dict(h, _loc=loc) for h in cls._query(session, loc, text, page=page).get("hits", [])]
+
+    @classmethod
+    def _find(cls, mat):
+        for h in cls._hits:
+            sw = (h.get("swatches") or {}).get(mat)
+            if sw:
+                return h, sw
+        return None, None
+
+    @classmethod
+    def resolve(cls, session, art_raw, note, color, model):
+        mat = str(art_raw).strip().upper()
+        cls._search(session, "")
+        h, sw = cls._find(mat)
+        words = [w for w in str(model or "").upper().split() if w not in ("SHOES", "W", "J", "M", "WIDE")]
+        if not sw and words:
+            for n in (3, 2):
+                cls._search(session, " ".join(words[:n]))
+            h, sw = cls._find(mat)
+        if sw:
+            base = h.get("imageBaseUrl", "https://cdn.dam.salomon.com")
+            paths = [sw.get("image"), sw.get("imageBack")] + list(sw.get("imagesExtra") or [])
+            srcs = []
+            for pth in paths:
+                if pth and mat in pth and re.search(r"\.(png|jpe?g|webp)(\?|$)", pth, re.I):
+                    u = base + pth
+                    if u not in srcs:
+                        srcs.append(u)
+            link = re.sub(r"/L[0-9A-Z]{8}$", "", h.get("url", "")) + f"/{mat}"
+            if not srcs:
+                return {"kind": "yellow", "link": link, "status": f"საიტზე არის, მაგრამ სურათი არ აქვს — {h.get('modelName')}"}
+            return {"kind": "green", "link": link, "key": mat, "srcs": srcs,
+                    "status": f"ნაპოვნია: {h.get('modelName')} ({h.get('detailedTitle', '')})"}
+        cands = {}
+        want = [w for w in tokens(" ".join(words)) if w not in ("GTX", "WP")][:2]
+        for x in cls._hits:
+            have = tokens(x.get("modelName", ""))
+            if want and have[:len(want)] == want:
+                cands.setdefault(x["modelName"], set()).update((x.get("swatches") or {}).keys())
+        if cands:
+            return {"kind": "yellow",
+                    "status": "შესამოწმებელი: ეს კოდი საიტზე არ არის, მაგრამ მოდელი სხვა ფერებით არის: "
+                              + "; ".join(f"{k} ({', '.join(sorted(v))})" for k, v in cands.items())}
+        return {"kind": "red", "status": "საიტზე ვერ ვიპოვე (Salomon-ის ონლაინ კატალოგში ეს მოდელი არ არის)"}
+
+
+BRANDS = {"casco": Casco, "lenz": Lenz, "shred": Shred, "schreuderssport": Schreuderssport, "salomon": Salomon}
 
 
 # ---------- ქსელი ----------
@@ -458,7 +536,7 @@ def find_header(ws):
     for row in ws.iter_rows(min_row=1, max_row=15):
         names = {str(c.value).strip(): c.column for c in row if c.value is not None}
         cols = {k: next((names[n] for n in v if n in names), None) for k, v in COLS.items()}
-        if cols["code"] and cols["article"]:
+        if cols["article"]:
             return row[0].row, cols
     sys.exit("სათაურის სტრიქონი ვერ ვიპოვე (საჭიროა 'კოდი' და 'მოდელის კოდი' / 'მომწ. კოდი')")
 
@@ -470,10 +548,11 @@ def main():
     ap.add_argument("--brand", choices=sorted(BRANDS))
     ap.add_argument("--size", type=int, default=1500, help="მაქს. ზომა პიქსელებში; 0 = ორიგინალი")
     ap.add_argument("--odoo", default=None)
+    ap.add_argument("--sheet", default=None, help="ფურცლის სახელი (ნაგულისხმევად პირველი)")
     args = ap.parse_args()
 
     wb = openpyxl.load_workbook(args.excel)
-    ws = wb.active
+    ws = wb[args.sheet] if args.sheet else wb.active
     header_row, cols = find_header(ws)
 
     brand_key = args.brand
@@ -508,8 +587,10 @@ def main():
     stats = {k: 0 for k in ICONS}
     for r in range(header_row + 1, ws.max_row + 1):
         row = ws[r]
-        code = ws.cell(r, cols["code"]).value
         art_raw = ws.cell(r, cols["article"]).value
+        code = ws.cell(r, cols["code"]).value if cols["code"] else None
+        if code in (None, ""):
+            code = art_raw  # Odoo-ს კოდი თუ არ არის, ფაილს მომწოდებლის კოდით ვარქმევთ
         if code in (None, "") or art_raw in (None, ""):
             continue
         code = str(code).strip()
